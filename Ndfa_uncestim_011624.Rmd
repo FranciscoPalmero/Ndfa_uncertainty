@@ -1,0 +1,340 @@
+---
+title: "Uncertainty estimation on the Ndfa needed to achieve neutral N balances in grain legumes"
+author: Francisco Palmero
+output:
+  html_document:
+    df_print: paged
+---
+
+In this file we present the code to apply the method presented in Palmero et al. (2023). This method aims to quantify the uncertainty on the Ndfa needed to achieve neutral partial N balance or total N balance. We will show the application of the delta method, bootstrapping, and Bayesian inference to only field pea and white lupin. The same procedure can be used for any other species. For more information, please, see Palmero et al. (2023).
+
+The method focuses on the simple linear model $$y_i = \beta_0 + \beta_1 x + \epsilon_i$$. In this model $y_i$ is the PNB or TNB (in $kg~ha^{-1}$) for the ith observation, $x_i$ is the ith observation of Ndfa (predictor variable),  $\beta_0$ (intercept) is the expected PNB or TNB when the crop did not fix N (i.e., when $x_i=0$), $\beta_1$ (slope) is the change in PNB or TNB per unit of Ndfa, and $\epsilon_i$ is the residual error. Furthermore, it was assumed that $\epsilon_i \sim N(0,\sigma^2)$. 
+
+Then, according to presented linear model, the Ndfa to get a neutral PNB or TNB can be determined by finding the x value when $E(y_i) = 0$. We called this quantity $\theta$, and it can be calculated according to $\theta = \frac{-\beta_0}{\beta_1}$.
+
+The focus of this document is to account for the uncertainty on $\theta$.
+
+
+# Calling the requiered packages
+```{r libraries, warning=FALSE, message=FALSE}
+easypackages::libraries(# To read the databases
+                        "readxl",
+                        # Data wrangling and other tasks
+                        "tidyverse",
+                        # For conducting the delta method
+                        "msm",
+                        # To make resamplings to perform bootstrapping analyses
+                        "rsample",
+                        # To run the Bayesian analyses
+                        "rstan"
+                        )
+```
+
+
+# A) Partial N Balance
+# 1) Delta method
+```{r}
+# Fit the linear model of the partial N balance as a function of Ndfa 
+PNB_lsq <- lm(PNB~Ndfa, data = df)
+# Explore the fitted model
+summary(PNB_lsq)
+# Save \beta_0 (the intercept)
+PNB_B0.hat <- coef(PNB_lsq)[1]
+# Save \beta_1 (the slope)
+PNB_B1.hat <- coef(PNB_lsq)[2]
+# Calculate \theta
+PNB_theta.hat <- -PNB_B0.hat/PNB_B1.hat
+
+# Get the covariance matrix of the linear model
+PNB_V <- vcov(PNB_lsq)
+# Get the the intercept (\beta_0) and the slope (\beta_1) of the model
+PNB_beta.hat <- coef(PNB_lsq)
+# Applied the delta method for approximating the standard error of \theta
+PNB_se.hat <- deltamethod(g = ~-x1/x2, mean = PNB_beta.hat, cov = PNB_V)
+
+# Compute the confidence interval of \theta assuming a normal distriution
+PNB_theta.hat-1.96*PNB_se.hat
+PNB_theta.hat
+PNB_theta.hat+1.96*PNB_se.hat
+```
+
+
+
+# 2) Bootstrapping
+```{r}
+# Set a seed for reproducibility
+set.seed(79)
+# Take 10000 samples by sampling with replacement. The size of each resample is the same as the number of obervations in the dataset.
+PNB_boot <- rsample::bootstraps(data = df,
+           times = 10000,
+           strata = NULL)
+# Fit the linear model in each of the 10000 resamples and get the estimates for each of them 
+PNB_PartNbal_boot <- PNB_boot %>%
+  mutate(model = map(splits, ~ lm(PNB ~ Ndfa, data = .)),
+         coef_info = map(model, generics::tidy)
+         ) %>%
+  unnest(coef_info)
+
+# Calculate \theta based on the fitted model in each of the resamples
+PNB_boot.coefs <- PNB_PartNbal_boot %>%
+  pivot_wider(., id_cols = id,
+              names_from = term,
+              values_from = estimate) %>%
+  rename(B0 = "(Intercept)", B1 = Ndfa) %>%
+  mutate(theta = c(-B0/B1))
+
+# Extract the empirical confidence interval of \theta
+PNB_boot.coefs %>%
+summarise(thetaQ0.025 = quantile(theta, probs = 0.025),
+          theta_median = median(theta),
+          thetaQ0.975 = quantile(theta, probs = 0.975)
+          )
+```
+
+
+
+# 3) Bayesian inference
+The model in Stan language presented here was written using field pea (Pisum sativum L.) as an example.
+The prior for each parameter in the model should be change in the model according to the desired each legume species. 
+
+Consider the original model $$y_i = \beta_0 + \beta_1 x + \epsilon_i$$, and the fact that the Ndfa to get a neutral PNB can be computed as $\theta = \frac{-\beta_0}{\beta_1}$. Using the last expression, we can write $\beta_0$ as a function of $\theta$ and $beta_1$ represented as $\beta_0 = -\beta_1 \theta$. Now, we can use the last equality to plug it in the original linear model. Thus, the original linear model can be re-written as $$y_i = -\beta_1 \theta + \beta_1 x + \epsilon_i$$. We still assume that $\epsilon \sim N(0,\sigma^2)$.
+
+```{r}
+stan_model <- 
+  "// Field Pea: Pisum sativum L.
+// Partial N Balance
+
+// The input data is a vector 'y' of length 'N'.
+data {
+  int<lower=0> N; // Number of observations for the response variable
+  vector[N] x; // Vector for the predictor variable (x: Ndfa)
+  vector[N] y; // Vector for the response variable (y: Partial N Balance or N Balance)
+}
+
+// The parameters in the model. 
+parameters {
+  real<lower=0> theta2; // theta parameter = Ndfa needed to achieve a neutral balance
+  real <lower=0> beta1; // Slope
+  real<lower=0> sigma; // Standard deviation of the response variable
+}
+
+//
+transformed parameters{
+  real theta; // Rescale theta2 parameter to obtain values in the interval [0,100]
+  theta = theta2*100;
+  real beta0; // Defining the intercept as a function of the theta and beta1
+  beta0 = -beta1*theta; 
+}
+
+// The model to be estimated. We model the output
+// 'y' to be normally distributed with mean 'mu'
+// and standard deviation 'sigma'. Where mu = -beta1*theta + beta1*x
+model {
+  y ~ normal(-beta1*theta + beta1*x, sigma);
+  theta2 ~ beta(9.03818, 5.00947); // Prior for theta parameter
+  beta1 ~ gamma(1.6, 0.8); // Prior for beta1 parameter
+  sigma ~ gamma(2.5, 0.05); // standard deviation of the response variable
+  }
+
+// Getting more information
+generated quantities{
+ real<lower=0> variance_y; // Calculating the variance of the response variable
+ variance_y = sigma*sigma;
+ real y_rep[N] = normal_rng(-beta1*theta + beta1 * x, sigma); // Creating the y_rep for model checking
+ }
+"
+
+# Creating a function to fit the Bayesian model. The y_rep can be used for checking the model. Furtheremore, the intercept (beta0) can also be obtained.
+bayes_model <- function(x,y,
+                        param_saved = c("beta1", 
+                                        "theta", "sigma"
+                                        #,"beta0", "y_rep"
+                                        ),
+                        chains = 4, iter = 20000, warmup = 10000,
+                        cores = 4, apt_del = 0.8, thin = 5, 
+                        seed = 79
+                        ){
+  
+  df.list <- list(x = x,
+               y = y,
+               N = length(y))
+  
+  stan(model_code = stan_model,
+       data = df.list,
+       chains = chains,
+       iter = iter,
+       warmup = warmup,
+       cores = cores,
+       control=list(adapt_delta= apt_del),
+       thin = thin,
+       seed = seed,
+       pars = param_saved
+       )
+  
+}
+
+
+# Fitting the Bayesian model to the data
+
+PNB_bay.mod <- bayes_model(x = df$Ndfa,
+                              y = df$PNB)
+
+# Assesing the MCMC performance
+PNB_bay.mod
+rstan::traceplot(PNB_bay.mod)
+```
+
+
+
+# B) Total N Balance
+# 1) Delta method
+```{r}
+# Fit the linear model of the partial N balance as a function of Ndfa 
+TNB_lsq <- lm(TNB~Ndfa, data= df)
+# Explore the fitted model
+summary(TNB_lsq)
+# Save \beta_0 (the intercept)
+TNB_B0.hat <- coef(TNB_lsq)[1]
+# Save \beta_1 (the slope)
+TNB_B1.hat <- coef(TNB_lsq)[2]
+# Calculate \theta
+TNB_theta.hat <- -TNB_B0.hat/TNB_B1.hat
+
+# Get the covariance matrix of the linear model
+TNB_V <- vcov(TNB_lsq)
+# Get the the intercept (\beta_0) and the slope (\beta_1) of the model
+TNB_beta.hat <- coef(TNB_lsq)
+# Applied the delta method for approximating the standard error of \theta
+TNB_se.hat <- deltamethod(g = ~-x1/x2, mean = TNB_beta.hat, cov = TNB_V)
+
+# Compute the confidence interval of \theta assuming a normal distriution
+TNB_theta.hat-1.96*TNB_se.hat
+TNB_theta.hat
+TNB_theta.hat+1.96*TNB_se.hat
+```
+
+
+
+# 2) Bootstrapping
+```{r}
+# Set a seed for reproducibility
+set.seed(79)
+# Take 10000 samples by sampling with replacement. The size of each resample is the same as the number of obervations in the dataset.
+TNB_boot <- rsample::bootstraps(data = df,
+           times = 10000,
+           strata = NULL)
+# Fit the linear model in each of the 10000 resamples and get the estimates for each of them 
+TNB_PartNbal_boot <- TNB_boot %>%
+  mutate(model = map(splits, ~ lm(TNB ~ Ndfa, data = .)),
+         coef_info = map(model, generics::tidy)
+         ) %>%
+  unnest(coef_info)
+
+# Calculate \theta based on the fitted model in each of the resamples
+TNB_boot.coefs <- TNB_PartNbal_boot %>%
+  pivot_wider(., id_cols = id,
+              names_from = term,
+              values_from = estimate) %>%
+  rename(B0 = "(Intercept)", B1 = Ndfa) %>%
+  mutate(theta = c(-B0/B1))
+
+# Extract the empirical confidence interval of \theta
+TNB_boot.coefs %>%
+summarise(thetaQ0.025 = quantile(theta, probs = 0.025),
+          theta_median = median(theta),
+          thetaQ0.975 = quantile(theta, probs = 0.975)
+          )
+```
+
+
+
+# 3) Bayesian inference
+The model in Stan language presented here was written using field pea (Pisum sativum L.) as an example.
+The prior for each parameter in the model should be change in the model according to the desired each legume species. 
+
+Consider the original model $$y_i = \beta_0 + \beta_1 x + \epsilon_i$$, and the fact that the Ndfa to get a neutral TNB can be computed as $\theta = \frac{-\beta_0}{\beta_1}$. Using the last expression, we can write $\beta_0$ as a function of $\theta$ and $beta_1$ represented as $\beta_0 = -\beta_1 \theta$. Now, we can use the last equality to plug it in the original linear model. Thus, the original linear model can be re-written as $$y_i = -\beta_1 \theta + \beta_1 x + \epsilon_i$$. We still assume that $\epsilon \sim N(0,\sigma^2)$.
+
+```{r}
+stan_model <- 
+  "// Field Pea: Pisum sativum L.
+// Total N Balance
+
+// The input data is a vector 'y' of length 'N'.
+data {
+  int<lower=0> N; // Number of observations for the response variable
+  vector[N] x; // Vector for the predictor variable (x: Ndfa)
+  vector[N] y; // Vector for the response variable (y: Partial N Balance or N Balance)
+}
+
+// The parameters in the model. 
+parameters {
+  real<lower=0> theta2; // theta parameter = Ndfa needed to achieve a neutral balance
+  real <lower=0> beta1; // Slope
+  real<lower=0> sigma; // Standard deviation of the response variable
+}
+
+//
+transformed parameters{
+  real theta; // Rescale theta2 parameter to obtain values in the interval [0,100]
+  theta = theta2*100;
+  real beta0; // Defining the intercept as a function of the theta and beta1
+  beta0 = -beta1*theta; 
+}
+
+// The model to be estimated. We model the output
+// 'y' to be normally distributed with mean 'mu'
+// and standard deviation 'sigma'. Where mu = -beta1*theta + beta1*x
+model {
+  y ~ normal(-beta1*theta + beta1*x, sigma);
+  theta2 ~ beta(4.34001, 5.45022); // Prior for theta parameter
+  beta1 ~ gamma(1.6, 0.8); // Prior for beta1 parameter
+  sigma ~ gamma(2.5, 0.05); // standard deviation of the response variable
+  }
+
+// Getting more information
+generated quantities{
+ real<lower=0> variance_y; // Calculating the variance of the response variable
+ variance_y = sigma*sigma;
+ real y_rep[N] = normal_rng(-beta1*theta + beta1 * x, sigma); // Creating the y_rep for model checking
+ }
+"
+
+# Creating a function to fit the Bayesian model. The y_rep can be used for checking the model. Furtheremore, the intercept (beta0) can also be obtained. 
+bayes_model <- function(x,y,
+                        param_saved = c("beta1", 
+                                        "theta", "sigma"
+                                        #,"beta0", "y_rep"
+                                        ),
+                        chains = 4, iter = 20000, warmup = 10000,
+                        cores = 4, apt_del = 0.8, thin = 5, 
+                        seed = 79
+                        ){
+  
+  df.list <- list(x = x,
+               y = y,
+               N = length(y))
+  
+  stan(model_code = stan_model,
+       data = df.list,
+       chains = chains,
+       iter = iter,
+       warmup = warmup,
+       cores = cores,
+       control=list(adapt_delta= apt_del),
+       thin = thin,
+       seed = seed,
+       pars = param_saved
+       )
+  
+}
+
+
+# Fitting the Bayesian model to the data
+
+TNB_bay.mod <- bayes_model(x = df$Ndfa,
+                              y = df$TNB)
+
+# Assesing the MCMC performance
+TNB_bay.mod
+rstan::traceplot(TNB_bay.mod)
+```
