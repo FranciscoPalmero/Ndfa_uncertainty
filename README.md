@@ -1,1 +1,1 @@
-# Ndfa_uncertainty
+This repository was created to share the R code used to evaluate the delta method, bootstrapping, and Bayesian inference to estimate the uncertainty on the proportion of the N derived from the atmosphere (Ndfa) that is needed to achieve a neutral N balance in grain legume species.
