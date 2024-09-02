@@ -6,7 +6,7 @@ output:
     df_print: paged
 ---
 
-In this file we present the code to apply the method presented in Palmero et al. (2023). This method aims to quantify the uncertainty on the Ndfa needed to achieve neutral partial N balance or total N balance. We will show the application of the delta method, bootstrapping, and Bayesian inference to only field pea and white lupin. The same procedure can be used for any other species. For more information, please, see Palmero et al. (2023).
+In this file we present the code to apply the method presented in Palmero et al. (2024). This method aims to quantify the uncertainty on the Ndfa needed to achieve neutral partial N balance or total N balance. We will show the application of the delta method, bootstrapping, and Bayesian inference to only field pea and white lupin. The same procedure can be used for any other species. For more information, please, see Palmero et al. (2024).
 
 The method focuses on the simple linear model $$y_i = \beta_0 + \beta_1 x + \epsilon_i$$. In this model $y_i$ is the PNB or TNB (in $kg~ha^{-1}$) for the ith observation, $x_i$ is the ith observation of Ndfa (predictor variable),  $\beta_0$ (intercept) is the expected PNB or TNB when the crop did not fix N (i.e., when $x_i=0$), $\beta_1$ (slope) is the change in PNB or TNB per unit of Ndfa, and $\epsilon_i$ is the residual error. Furthermore, it was assumed that $\epsilon_i \sim N(0,\sigma^2)$. 
 
